@@ -5,14 +5,19 @@ declare(strict_types=1);
 namespace JMS\Serializer\Tests;
 
 use JMS\Serializer\DeserializationContext;
+use JMS\Serializer\Exception\UnsupportedFormatException;
 use JMS\Serializer\Expression\ExpressionEvaluator;
 use JMS\Serializer\Handler\HandlerRegistry;
 use JMS\Serializer\SerializationContext;
 use JMS\Serializer\SerializerBuilder;
+use JMS\Serializer\Tests\Fixtures\DocBlockType\Collection\Details\ProductDescription;
+use JMS\Serializer\Tests\Fixtures\DocBlockType\SingleClassFromDifferentNamespaceTypeHint;
 use JMS\Serializer\Tests\Fixtures\PersonSecret;
 use JMS\Serializer\Tests\Fixtures\PersonSecretWithVariables;
 use JMS\Serializer\Type\ParserInterface;
 use JMS\Serializer\Visitor\Factory\JsonSerializationVisitorFactory;
+use PHPUnit\Framework\Constraint\FileExists;
+use PHPUnit\Framework\Constraint\LogicalNot;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\ExpressionLanguage\ExpressionFunction;
 use Symfony\Component\ExpressionLanguage\ExpressionLanguage;
@@ -40,7 +45,8 @@ class SerializerBuilderTest extends TestCase
 
     public function testWithCache()
     {
-        self::assertFileNotExists($this->tmpDir);
+        // @todo change to static::assertFileNotExists when support for PHPUnit 8 and PHP 7.2 is dropped
+        static::assertThat($this->tmpDir, new LogicalNot(new FileExists()));
 
         self::assertSame($this->builder, $this->builder->setCacheDir($this->tmpDir));
         $serializer = $this->builder->build();
@@ -50,8 +56,8 @@ class SerializerBuilderTest extends TestCase
         self::assertFileExists($this->tmpDir . '/metadata');
 
         $factory = $this->getField($serializer, 'factory');
-        self::assertAttributeSame(false, 'debug', $factory);
-        self::assertAttributeNotSame(null, 'cache', $factory);
+        self::assertFalse($this->getField($factory, 'debug'));
+        self::assertNotNull($this->getField($factory, 'cache'));
     }
 
     public function testDoesAddDefaultHandlers()
@@ -88,16 +94,15 @@ class SerializerBuilderTest extends TestCase
         self::assertEquals('{}', $this->builder->build()->serialize(new \DateTime('2020-04-16'), 'json'));
     }
 
-    /**
-     * @expectedException JMS\Serializer\Exception\UnsupportedFormatException
-     * @expectedExceptionMessage The format "xml" is not supported for serialization.
-     */
     public function testDoesNotAddOtherVisitorsWhenConfiguredExplicitly()
     {
         self::assertSame(
             $this->builder,
             $this->builder->setSerializationVisitor('json', new JsonSerializationVisitorFactory())
         );
+
+        $this->expectException(UnsupportedFormatException::class);
+        $this->expectExceptionMessage('The format "xml" is not supported for serialization.');
 
         $this->builder->build()->serialize('foo', 'xml');
     }
@@ -251,6 +256,26 @@ class SerializerBuilderTest extends TestCase
         self::assertEquals('{"name":"mike","gender":"f"}', $serialized);
 
         $object = $serializer->deserialize($serialized, PersonSecretWithVariables::class, 'json');
+        self::assertEquals($person, $object);
+    }
+
+    public function testEnablingDocBlockResolver()
+    {
+        $language = new ExpressionLanguage();
+        $this->builder->setExpressionEvaluator(new ExpressionEvaluator($language));
+        $this->builder->setDocBlockTypeResolver(true);
+
+        $serializer = $this->builder->build();
+
+        $person = new SingleClassFromDifferentNamespaceTypeHint();
+        $productDescription = new ProductDescription();
+        $productDescription->description = 'info';
+        $person->data = $productDescription;
+
+        $serialized = $serializer->serialize($person, 'json');
+        self::assertEquals('{"data":{"description":"info"}}', $serialized);
+
+        $object = $serializer->deserialize($serialized, SingleClassFromDifferentNamespaceTypeHint::class, 'json');
         self::assertEquals($person, $object);
     }
 

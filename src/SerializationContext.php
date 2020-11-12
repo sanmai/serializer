@@ -43,6 +43,8 @@ class SerializationContext extends Context
      */
     public function setSerializeNull(bool $bool): self
     {
+        $this->assertMutable();
+
         $this->serializeNull = $bool;
 
         return $this;
@@ -65,6 +67,7 @@ class SerializationContext extends Context
         if (!\is_object($object)) {
             return;
         }
+
         $this->visitingSet->attach($object);
         $this->visitingStack->push($object);
     }
@@ -77,6 +80,7 @@ class SerializationContext extends Context
         if (!\is_object($object)) {
             return;
         }
+
         $this->visitingSet->detach($object);
         $poppedObject = $this->visitingStack->pop();
 
@@ -131,7 +135,6 @@ class SerializationContext extends Context
         return $this->visitingStack;
     }
 
-
     public function getVisitingSet(): \SplObjectStorage
     {
         return $this->visitingSet;
@@ -142,8 +145,11 @@ class SerializationContext extends Context
      */
     public function setInitialType(string $type): self
     {
+        $this->assertMutable();
+
         $this->initialType = $type;
         $this->setAttribute('initial_type', $type);
+
         return $this;
     }
 

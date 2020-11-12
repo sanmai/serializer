@@ -16,14 +16,21 @@ env:
 matrix:
     include:
         - php: 7.2
-        - php: 7.3
-        - php: "7.4snapshot"
+          env: PHPUNIT_FLAGS='--coverage-clover clover'
         - php: 7.2
           env: COMPOSER_FLAGS='--prefer-lowest --prefer-stable'
         - php: 7.2
           env: TARGET=docs
         - php: 7.2
           env: TARGET=cs
+
+        - php: 7.3
+        - php: 7.4
+
+        - php: 7.4
+          env: VERY_LATEST=1
+        - php: 8.0snapshot
+          env: COMPOSER_FLAGS='--ignore-platform-req=php'
     fast_finish: true
 
 install:

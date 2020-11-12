@@ -4,31 +4,32 @@ declare(strict_types=1);
 
 namespace JMS\Serializer\EventDispatcher\Subscriber;
 
-use Doctrine\Common\Persistence\Proxy;
+use Doctrine\Common\Persistence\Proxy as LegacyProxy;
 use Doctrine\ODM\MongoDB\PersistentCollection as MongoDBPersistentCollection;
 use Doctrine\ODM\PHPCR\PersistentCollection as PHPCRPersistentCollection;
 use Doctrine\ORM\PersistentCollection;
-use Doctrine\ORM\Proxy\Proxy as ORMProxy;
+use Doctrine\Persistence\Proxy;
 use JMS\Serializer\EventDispatcher\EventDispatcherInterface;
 use JMS\Serializer\EventDispatcher\EventSubscriberInterface;
 use JMS\Serializer\EventDispatcher\PreSerializeEvent;
+use ProxyManager\Proxy\LazyLoadingInterface;
 
 final class DoctrineProxySubscriber implements EventSubscriberInterface
 {
     /**
      * @var bool
      */
-    private $skipVirtualTypeInit = true;
+    private $skipVirtualTypeInit;
 
     /**
      * @var bool
      */
-    private $initializeExcluded = false;
+    private $initializeExcluded;
 
     public function __construct(bool $skipVirtualTypeInit = true, bool $initializeExcluded = false)
     {
-        $this->skipVirtualTypeInit = (bool) $skipVirtualTypeInit;
-        $this->initializeExcluded = (bool) $initializeExcluded;
+        $this->skipVirtualTypeInit = $skipVirtualTypeInit;
+        $this->initializeExcluded = $initializeExcluded;
     }
 
     public function onPreSerialize(PreSerializeEvent $event): void
@@ -41,7 +42,8 @@ final class DoctrineProxySubscriber implements EventSubscriberInterface
         // so it must be loaded if its a real class.
         $virtualType = !class_exists($type['name'], false);
 
-        if ($object instanceof PersistentCollection
+        if (
+            $object instanceof PersistentCollection
             || $object instanceof MongoDBPersistentCollection
             || $object instanceof PHPCRPersistentCollection
         ) {
@@ -52,8 +54,9 @@ final class DoctrineProxySubscriber implements EventSubscriberInterface
             return;
         }
 
-        if (($this->skipVirtualTypeInit && $virtualType) ||
-            (!$object instanceof Proxy && !$object instanceof ORMProxy)
+        if (
+            ($this->skipVirtualTypeInit && $virtualType) ||
+            (!$object instanceof Proxy && !$object instanceof LazyLoadingInterface)
         ) {
             return;
         }
@@ -68,7 +71,11 @@ final class DoctrineProxySubscriber implements EventSubscriberInterface
             }
         }
 
-        $object->__load();
+        if ($object instanceof LazyLoadingInterface) {
+            $object->initializeProxy();
+        } else {
+            $object->__load();
+        }
 
         if (!$virtualType) {
             $event->setType(get_parent_class($object), $type['params']);
@@ -107,10 +114,13 @@ final class DoctrineProxySubscriber implements EventSubscriberInterface
     {
         return [
             ['event' => 'serializer.pre_serialize', 'method' => 'onPreSerializeTypedProxy', 'interface' => Proxy::class],
+            ['event' => 'serializer.pre_serialize', 'method' => 'onPreSerializeTypedProxy', 'interface' => LegacyProxy::class],
             ['event' => 'serializer.pre_serialize', 'method' => 'onPreSerialize', 'interface' => PersistentCollection::class],
             ['event' => 'serializer.pre_serialize', 'method' => 'onPreSerialize', 'interface' => MongoDBPersistentCollection::class],
             ['event' => 'serializer.pre_serialize', 'method' => 'onPreSerialize', 'interface' => PHPCRPersistentCollection::class],
             ['event' => 'serializer.pre_serialize', 'method' => 'onPreSerialize', 'interface' => Proxy::class],
+            ['event' => 'serializer.pre_serialize', 'method' => 'onPreSerialize', 'interface' => LegacyProxy::class],
+            ['event' => 'serializer.pre_serialize', 'method' => 'onPreSerialize', 'interface' => LazyLoadingInterface::class],
         ];
     }
 }

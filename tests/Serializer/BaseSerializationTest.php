@@ -10,6 +10,9 @@ use JMS\Serializer\Context;
 use JMS\Serializer\DeserializationContext;
 use JMS\Serializer\EventDispatcher\EventDispatcher;
 use JMS\Serializer\EventDispatcher\Subscriber\DoctrineProxySubscriber;
+use JMS\Serializer\Exception\ExpressionLanguageRequiredException;
+use JMS\Serializer\Exception\InvalidMetadataException;
+use JMS\Serializer\Exception\NotAcceptableException;
 use JMS\Serializer\Exclusion\DepthExclusionStrategy;
 use JMS\Serializer\Exclusion\GroupsExclusionStrategy;
 use JMS\Serializer\Expression\ExpressionEvaluator;
@@ -48,6 +51,8 @@ use JMS\Serializer\Tests\Fixtures\Discriminator\Car;
 use JMS\Serializer\Tests\Fixtures\Discriminator\ImagePost;
 use JMS\Serializer\Tests\Fixtures\Discriminator\Moped;
 use JMS\Serializer\Tests\Fixtures\Discriminator\Post;
+use JMS\Serializer\Tests\Fixtures\Discriminator\Serialization\ExtendedUser;
+use JMS\Serializer\Tests\Fixtures\Discriminator\Serialization\User;
 use JMS\Serializer\Tests\Fixtures\DiscriminatorGroup\Car as DiscriminatorGroupCar;
 use JMS\Serializer\Tests\Fixtures\ExclusionStrategy\AlwaysExcludeExclusionStrategy;
 use JMS\Serializer\Tests\Fixtures\FirstClassListCollection;
@@ -88,6 +93,9 @@ use JMS\Serializer\Tests\Fixtures\Order;
 use JMS\Serializer\Tests\Fixtures\ParentDoNotSkipWithEmptyChild;
 use JMS\Serializer\Tests\Fixtures\ParentNoMetadataChildObject;
 use JMS\Serializer\Tests\Fixtures\ParentSkipWithEmptyChild;
+use JMS\Serializer\Tests\Fixtures\PersonAccount;
+use JMS\Serializer\Tests\Fixtures\PersonAccountOnParent;
+use JMS\Serializer\Tests\Fixtures\PersonAccountWithParent;
 use JMS\Serializer\Tests\Fixtures\PersonSecret;
 use JMS\Serializer\Tests\Fixtures\PersonSecretMore;
 use JMS\Serializer\Tests\Fixtures\PersonSecretMoreVirtual;
@@ -101,6 +109,7 @@ use JMS\Serializer\Tests\Fixtures\SimpleObjectWithStaticProp;
 use JMS\Serializer\Tests\Fixtures\Tag;
 use JMS\Serializer\Tests\Fixtures\Timestamp;
 use JMS\Serializer\Tests\Fixtures\Tree;
+use JMS\Serializer\Tests\Fixtures\TypedProperties;
 use JMS\Serializer\Tests\Fixtures\VehicleInterfaceGarage;
 use JMS\Serializer\Visitor\DeserializationVisitorInterface;
 use JMS\Serializer\Visitor\SerializationVisitorInterface;
@@ -114,9 +123,10 @@ use Symfony\Component\Form\FormConfigBuilder;
 use Symfony\Component\Form\FormError;
 use Symfony\Component\Form\FormFactoryBuilder;
 use Symfony\Component\Translation\IdentityTranslator;
-use Symfony\Component\Translation\MessageSelector;
 use Symfony\Component\Validator\ConstraintViolation;
 use Symfony\Component\Validator\ConstraintViolationList;
+
+use function assert;
 
 abstract class BaseSerializationTest extends TestCase
 {
@@ -149,10 +159,21 @@ abstract class BaseSerializationTest extends TestCase
         );
     }
 
+    public function testSerializeNullRoot()
+    {
+        $context = SerializationContext::create()
+            ->setAttribute('allows_root_null', true);
+
+        self::assertEquals(
+            $this->getContent('nullable_root'),
+            $this->serializer->serialize(null, $this->getFormat(), $context)
+        );
+    }
+
     public function testNoMetadataNeededWhenDeSerializingNotUsedProperty()
     {
-        /** @var ParentNoMetadataChildObject $dObj */
         $object = $this->deserialize($this->getContent('ParentNoMetadataChildObject'), ParentNoMetadataChildObject::class);
+        assert($object instanceof ParentNoMetadataChildObject);
 
         self::assertSame('John', $object->bar);
         self::assertNull($object->foo);
@@ -160,12 +181,12 @@ abstract class BaseSerializationTest extends TestCase
 
     public function testDeserializeObjectWithMissingTypedArrayProp()
     {
-        /** @var ObjectWithTypedArraySetter $dObj */
         $dObj = $this->serializer->deserialize(
             $this->getContent('empty_object'),
             ObjectWithTypedArraySetter::class,
             $this->getFormat()
         );
+        assert($dObj instanceof ObjectWithTypedArraySetter);
 
         self::assertInstanceOf(ObjectWithTypedArraySetter::class, $dObj);
 
@@ -211,19 +232,18 @@ abstract class BaseSerializationTest extends TestCase
 
         $obj = new ObjectWithNullProperty('foo', 'bar');
 
-        /** @var ObjectWithNullProperty $dObj */
         $dObj = $this->serializer->deserialize(
             $this->getContent('simple_object_nullable'),
             ObjectWithNullProperty::class,
             $this->getFormat()
         );
+        assert($dObj instanceof ObjectWithNullProperty);
 
         self::assertEquals($obj, $dObj);
         self::assertNull($dObj->getNullProperty());
     }
 
     /**
-     * @expectedException \JMS\Serializer\Exception\NotAcceptableException
      * @dataProvider getTypes
      */
     public function testNull($type)
@@ -234,6 +254,9 @@ abstract class BaseSerializationTest extends TestCase
 
         // this is the default, but we want to be explicit here
         $context = SerializationContext::create()->setSerializeNull(false);
+
+        $this->expectException(NotAcceptableException::class);
+
         $this->serialize(null, $context);
     }
 
@@ -271,15 +294,90 @@ abstract class BaseSerializationTest extends TestCase
         }
     }
 
-    /**
-     * @expectedException \JMS\Serializer\Exception\ExpressionLanguageRequiredException
-     * @expectedExceptionMessage To use conditional exclude/expose in JMS\Serializer\Tests\Fixtures\PersonSecret you must configure the expression language.
-     */
+    public function testExcludeIfOnClass()
+    {
+        $accountNotExpired = new PersonAccount();
+        $accountNotExpired->name = 'Not expired account';
+        $accountNotExpired->expired = false;
+
+        $accountExpired = new PersonAccount();
+        $accountExpired->name = 'Expired account';
+        $accountExpired->expired = true;
+
+        $accounts = [$accountExpired, $accountNotExpired];
+
+        $language = new ExpressionLanguage();
+
+        $builder = SerializerBuilder::create();
+        $builder->setExpressionEvaluator(new ExpressionEvaluator($language));
+        $serializer = $builder->build();
+
+        $serialized  = $serializer->serialize($accounts, $this->getFormat(), null, sprintf('array<%s>', PersonAccountWithParent::class));
+        $deserialized = $serializer->deserialize($serialized, sprintf('array<%s>', PersonAccountWithParent::class), $this->getFormat());
+
+        $this->assertEquals(1, count($deserialized));
+        $this->assertEquals($accountNotExpired->name, $deserialized[0]->name);
+    }
+
+    public function testExcludeIfOnClassWithParent()
+    {
+        $accountNotExpired = new PersonAccountWithParent();
+        $accountNotExpired->name = 'Not expired account';
+        $accountNotExpired->expired = false;
+
+        $accountExpired = new PersonAccountWithParent();
+        $accountExpired->name = 'Expired account';
+        $accountExpired->expired = true;
+
+        $accounts = [$accountNotExpired, $accountExpired];
+
+        $language = new ExpressionLanguage();
+
+        $builder = SerializerBuilder::create();
+        $builder->setExpressionEvaluator(new ExpressionEvaluator($language));
+        $serializer = $builder->build();
+
+        $serialized  = $serializer->serialize($accounts, $this->getFormat(), null, sprintf('array<%s>', PersonAccountWithParent::class));
+        $deserialized = $serializer->deserialize($serialized, sprintf('array<%s>', PersonAccountWithParent::class), $this->getFormat());
+
+        $this->assertEquals(1, count($deserialized));
+        $this->assertEquals($accountNotExpired->name, $deserialized[0]->name);
+    }
+
+    public function testExcludeIfOnParentClass()
+    {
+        $accountNotExpired = new PersonAccountOnParent();
+        $accountNotExpired->name = 'Not expired account';
+        $accountNotExpired->expired = false;
+
+        $accountExpired = new PersonAccountOnParent();
+        $accountExpired->name = 'Expired account';
+        $accountExpired->expired = true;
+
+        $accounts = [$accountNotExpired, $accountExpired];
+
+        $language = new ExpressionLanguage();
+
+        $builder = SerializerBuilder::create();
+        $builder->setExpressionEvaluator(new ExpressionEvaluator($language));
+        $serializer = $builder->build();
+
+        $serialized  = $serializer->serialize($accounts, $this->getFormat(), null, sprintf('array<%s>', PersonAccountOnParent::class));
+        $deserialized = $serializer->deserialize($serialized, sprintf('array<%s>', PersonAccountOnParent::class), $this->getFormat());
+
+        $this->assertEquals(1, count($deserialized));
+        $this->assertEquals($accountNotExpired->name, $deserialized[0]->name);
+    }
+
     public function testExpressionExclusionNotConfigured()
     {
         $person = new PersonSecret();
         $person->gender = 'f';
         $person->name = 'mike';
+
+        $this->expectException(ExpressionLanguageRequiredException::class);
+        $this->expectExceptionMessage('To use conditional exclude/expose in JMS\Serializer\Tests\Fixtures\PersonSecret you must configure the expression language.');
+
         $this->serialize($person);
     }
 
@@ -448,10 +546,10 @@ abstract class BaseSerializationTest extends TestCase
 
         $obj = new SimpleInternalObject('foo', 'bar');
 
-        $this->assertEquals($this->getContent('simple_object'), $this->serialize($obj));
+        self::assertEquals($this->getContent('simple_object'), $this->serialize($obj));
 
         if ($this->hasDeserializer()) {
-            $this->assertEquals($obj, $this->deserialize($this->getContent('simple_object'), get_class($obj)));
+            self::assertEquals($obj, $this->deserialize($this->getContent('simple_object'), get_class($obj)));
         }
     }
 
@@ -466,10 +564,10 @@ abstract class BaseSerializationTest extends TestCase
 
     public function testSimpleObjectStaticProp()
     {
-        $this->assertEquals($this->getContent('simple_object'), $this->serialize($obj = new SimpleObjectWithStaticProp('foo', 'bar')));
+        self::assertEquals($this->getContent('simple_object'), $this->serialize($obj = new SimpleObjectWithStaticProp('foo', 'bar')));
 
         if ($this->hasDeserializer()) {
-            $this->assertEquals($obj, $this->deserialize($this->getContent('simple_object'), get_class($obj)));
+            self::assertEquals($obj, $this->deserialize($this->getContent('simple_object'), get_class($obj)));
         }
     }
 
@@ -558,8 +656,8 @@ abstract class BaseSerializationTest extends TestCase
         self::assertEquals($this->getContent('array_datetimes_object'), $serializedObject);
 
         if ($this->hasDeserializer()) {
-            /** @var DateTimeArraysObject $deserializedObject */
             $deserializedObject = $this->deserialize($this->getContent('array_datetimes_object'), 'Jms\Serializer\Tests\Fixtures\DateTimeArraysObject');
+            assert($deserializedObject instanceof DateTimeArraysObject);
 
             /** deserialized object has a default timezone set depending on user's timezone settings. That's why we manually set the UTC timezone on the DateTime objects. */
             foreach ($deserializedObject->getArrayWithDefaultDateTime() as $dateTime) {
@@ -592,8 +690,8 @@ abstract class BaseSerializationTest extends TestCase
                 return;
             }
 
-            /** @var NamedDateTimeArraysObject $deserializedObject */
-            $deserializedObject = $this->deserialize($this->getContent('array_named_datetimes_object'), 'Jms\Serializer\Tests\Fixtures\NamedDateTimeArraysObject');
+            $deserializedObject = $this->deserialize($this->getContent('array_named_datetimes_object'), NamedDateTimeArraysObject::class);
+            assert($deserializedObject instanceof NamedDateTimeArraysObject);
 
             /** deserialized object has a default timezone set depending on user's timezone settings. That's why we manually set the UTC timezone on the DateTime objects. */
             foreach ($deserializedObject->getNamedArrayWithFormattedDate() as $dateTime) {
@@ -623,8 +721,9 @@ abstract class BaseSerializationTest extends TestCase
             if ('xml' === $this->getFormat()) {
                 $this->markTestSkipped('XML deserialization does not support key-val pairs mode');
             }
-            /** @var NamedDateTimeArraysObject $deserializedObject */
-            $deserializedObject = $this->deserialize($this->getContent('array_named_datetimeimmutables_object'), 'Jms\Serializer\Tests\Fixtures\NamedDateTimeImmutableArraysObject');
+
+            $deserializedObject = $this->deserialize($this->getContent('array_named_datetimeimmutables_object'), NamedDateTimeImmutableArraysObject::class);
+            assert($deserializedObject instanceof NamedDateTimeImmutableArraysObject);
 
             /** deserialized object has a default timezone set depending on user's timezone settings. That's why we manually set the UTC timezone on the DateTime objects. */
             foreach ($deserializedObject->getNamedArrayWithFormattedDate() as $dateTime) {
@@ -651,7 +750,7 @@ abstract class BaseSerializationTest extends TestCase
         if ($this->hasDeserializer()) {
             $deserialized = $this->deserialize($this->getContent($key), $type);
 
-            self::assertInternalType('object', $deserialized);
+            self::assertIsObject($deserialized);
             self::assertInstanceOf(get_class($value), $deserialized);
             self::assertEquals($value->getTimestamp(), $deserialized->getTimestamp());
         }
@@ -661,6 +760,7 @@ abstract class BaseSerializationTest extends TestCase
     {
         return [
             ['date_time', new \DateTime('2011-08-30 00:00', new \DateTimeZone('UTC')), 'DateTime'],
+            ['date_time_multi_format', new \DateTime('2011-08-30 00:00', new \DateTimeZone('UTC')), "DateTime<'Y-m-d', '', ['Y-m-d','Y-m-d\TH:i:sP']>"],
         ];
     }
 
@@ -675,7 +775,7 @@ abstract class BaseSerializationTest extends TestCase
         if ($this->hasDeserializer()) {
             $deserialized = $this->deserialize($this->getContent($key), $type);
 
-            self::assertInternalType('object', $deserialized);
+            self::assertIsObject($deserialized);
             self::assertInstanceOf(get_class($value), $deserialized);
             self::assertEquals($value->getTimestamp(), $deserialized->getTimestamp());
         }
@@ -730,14 +830,14 @@ abstract class BaseSerializationTest extends TestCase
         if ($this->hasDeserializer()) {
             $deserialized = $this->deserialize($this->getContent('blog_post'), get_class($post));
             self::assertEquals('2011-07-30T00:00:00+00:00', $this->getField($deserialized, 'createdAt')->format(\DateTime::ATOM));
-            self::assertAttributeEquals('This is a nice title.', 'title', $deserialized);
-            self::assertAttributeSame(false, 'published', $deserialized);
-            self::assertAttributeSame(false, 'reviewed', $deserialized);
-            self::assertAttributeSame('e86ce85cdb1253e4fc6352f5cf297248bceec62b', 'etag', $deserialized);
-            self::assertAttributeEquals(new ArrayCollection([$comment]), 'comments', $deserialized);
-            self::assertAttributeEquals([$comment], 'comments2', $deserialized);
-            self::assertAttributeEquals($author, 'author', $deserialized);
-            self::assertAttributeEquals([$tag1, $tag2], 'tag', $deserialized);
+            self::assertSame('This is a nice title.', $this->getField($deserialized, 'title'));
+            self::assertFalse($this->getField($deserialized, 'published'));
+            self::assertFalse($this->getField($deserialized, 'reviewed'));
+            self::assertSame('e86ce85cdb1253e4fc6352f5cf297248bceec62b', $this->getField($deserialized, 'etag'));
+            self::assertEquals(new ArrayCollection([$comment]), $this->getField($deserialized, 'comments'));
+            self::assertEquals([$comment], $this->getField($deserialized, 'comments2'));
+            self::assertEquals($author, $this->getField($deserialized, 'author'));
+            self::assertEquals([$tag1, $tag2], $this->getField($deserialized, 'tag'));
         }
     }
 
@@ -760,10 +860,10 @@ abstract class BaseSerializationTest extends TestCase
             $deserialized = $this->deserialize($this->getContent('blog_post_unauthored'), get_class($post), DeserializationContext::create());
 
             self::assertEquals('2011-07-30T00:00:00+00:00', $this->getField($deserialized, 'createdAt')->format(\DateTime::ATOM));
-            self::assertAttributeEquals('This is a nice title.', 'title', $deserialized);
-            self::assertAttributeSame(false, 'published', $deserialized);
-            self::assertAttributeSame(false, 'reviewed', $deserialized);
-            self::assertAttributeEquals(new ArrayCollection(), 'comments', $deserialized);
+            self::assertSame('This is a nice title.', $this->getField($deserialized, 'title'));
+            self::assertFalse($this->getField($deserialized, 'published'));
+            self::assertFalse($this->getField($deserialized, 'reviewed'));
+            self::assertEquals(new ArrayCollection(), $this->getField($deserialized, 'comments'));
             self::assertEquals(null, $this->getField($deserialized, 'author'));
         }
     }
@@ -792,15 +892,14 @@ abstract class BaseSerializationTest extends TestCase
         self::assertEquals($this->getContent('author_expression_context'), $serializer->serialize($author, $this->getFormat()));
     }
 
-
-    /**
-     * @expectedException \JMS\Serializer\Exception\ExpressionLanguageRequiredException
-     * @expectedExceptionMessage The property firstName on JMS\Serializer\Tests\Fixtures\AuthorExpressionAccess requires the expression accessor strategy to be enabled.
-     */
     public function testExpressionAccessorStrategNotEnabled()
     {
         $author = new AuthorExpressionAccess(123, 'Ruud', 'Kamphuis');
-        self::assertEquals($this->getContent('author_expression'), $this->serialize($author));
+
+        $this->expectException(ExpressionLanguageRequiredException::class);
+        $this->expectExceptionMessage('The property firstName on JMS\Serializer\Tests\Fixtures\AuthorExpressionAccess requires the expression accessor strategy to be enabled.');
+
+        $this->serialize($author);
     }
 
     public function testReadOnly()
@@ -973,7 +1072,7 @@ abstract class BaseSerializationTest extends TestCase
     {
         $object = new ObjectWithLifecycleCallbacks();
         self::assertEquals($this->getContent('lifecycle_callbacks'), $this->serialize($object));
-        self::assertAttributeSame(null, 'name', $object);
+        self::assertNull($this->getField($object, 'name'));
 
         if ($this->hasDeserializer()) {
             $deserialized = $this->deserialize($this->getContent('lifecycle_callbacks'), get_class($object));
@@ -1098,9 +1197,9 @@ abstract class BaseSerializationTest extends TestCase
 
         if ($this->hasDeserializer()) {
             $object = $this->deserialize($this->getContent('mixed_access_types'), 'JMS\Serializer\Tests\Fixtures\GetSetObject');
-            self::assertAttributeEquals(1, 'id', $object);
-            self::assertAttributeEquals('Johannes', 'name', $object);
-            self::assertAttributeEquals(42, 'readOnlyProperty', $object);
+            self::assertSame(1, $this->getField($object, 'id'));
+            self::assertSame('Johannes', $this->getField($object, 'name'));
+            self::assertSame(42, $this->getField($object, 'readOnlyProperty'));
         }
     }
 
@@ -1195,13 +1294,12 @@ abstract class BaseSerializationTest extends TestCase
         );
     }
 
-    /**
-     * @expectedException \JMS\Serializer\Exception\InvalidMetadataException
-     * @expectedExceptionMessage Invalid group name "foo, bar" on "JMS\Serializer\Tests\Fixtures\InvalidGroupsObject->foo", did you mean to create multiple groups?
-     */
     public function testInvalidGroupName()
     {
         $groupsObject = new InvalidGroupsObject();
+
+        $this->expectException(InvalidMetadataException::class);
+        $this->expectExceptionMessage('Invalid group name "foo, bar" on "JMS\Serializer\Tests\Fixtures\InvalidGroupsObject->foo", did you mean to create multiple groups?');
 
         $this->serializer->serialize($groupsObject, $this->getFormat());
     }
@@ -1250,6 +1348,39 @@ abstract class BaseSerializationTest extends TestCase
         $serialized = $this->serializer->serialize(new CustomDeserializationObject('sometext'), $this->getFormat());
         $object = $this->serializer->deserialize($serialized, 'CustomDeserializationObject', $this->getFormat());
         self::assertEquals('customly_unserialized_value', $object->someProperty);
+    }
+
+    public function testTypedProperties()
+    {
+        if (PHP_VERSION_ID < 70400) {
+            $this->markTestSkipped(sprintf('%s requires PHP 7.4', __METHOD__));
+        }
+
+        $builder = SerializerBuilder::create($this->handlerRegistry, $this->dispatcher);
+        $builder->includeInterfaceMetadata(true);
+        $this->serializer = $builder->build();
+
+        $user = new TypedProperties\User();
+        $user->id = 1;
+        $user->created = new \DateTime('2010-10-01 00:00:00');
+        $user->updated = new \DateTime('2011-10-01 00:00:00');
+        $user->tags = ['a', 'b'];
+        $role = new TypedProperties\Role();
+        $role->id = 5;
+        $user->role = $role;
+        $user->vehicle = new TypedProperties\Car();
+
+        $result = $this->serialize($user);
+
+        self::assertEquals($this->getContent('typed_props'), $result);
+
+        if ($this->hasDeserializer()) {
+            // updated is read only
+            $user->updated = null;
+            $user->tags = [];
+
+            self::assertEquals($user, $this->deserialize($this->getContent('typed_props'), get_class($user)));
+        }
     }
 
     /**
@@ -1305,6 +1436,33 @@ abstract class BaseSerializationTest extends TestCase
         self::assertEquals(
             $this->getContent('car'),
             $this->serialize(new DiscriminatorGroupCar(5), $context)
+        );
+    }
+
+    public function getDiscrimatorObjectsSamples(): array
+    {
+        $u1 = new User(5, 'userName', 'userDesc');
+        $u2 = new ExtendedUser(5, 'userName', 'userDesc', 'extednedContent');
+        $arr = new ArrayCollection([$u1, $u2]);
+
+        return [
+            [$u1, 'user_discriminator'],
+            [$u2, 'user_discriminator_extended'],
+            [$arr, 'user_discriminator_array'],
+        ];
+    }
+
+    /**
+     * Test serializing entity that uses Discriminator and extends some base model class
+     *
+     * @dataProvider getDiscrimatorObjectsSamples
+     */
+    public function testDiscrimatorObjects($data, $contentId)
+    {
+        $context = SerializationContext::create()->setGroups(['entity.identification']);
+        self::assertEquals(
+            $this->getContent($contentId),
+            $this->serialize($data, $context)
         );
     }
 
@@ -1429,10 +1587,11 @@ abstract class BaseSerializationTest extends TestCase
 
     /**
      * @group polymorphic
-     * @expectedException LogicException
      */
     public function testPolymorphicObjectsInvalidDeserialization()
     {
+        $this->expectException(\LogicException::class);
+
         if (!$this->hasDeserializer()) {
             throw new \LogicException('No deserializer');
         }
@@ -1478,6 +1637,7 @@ abstract class BaseSerializationTest extends TestCase
         if (!$this->hasDeserializer()) {
             return;
         }
+
         $objectConstructor = new InitializedObjectConstructor(new UnserializeObjectConstructor());
 
         $builder = SerializerBuilder::create();
@@ -1498,7 +1658,7 @@ abstract class BaseSerializationTest extends TestCase
 
         self::assertSame($order, $deseralizedOrder);
         self::assertEquals(new Order(new Price(12.34)), $deseralizedOrder);
-        self::assertAttributeInstanceOf('JMS\Serializer\Tests\Fixtures\Price', 'cost', $deseralizedOrder);
+        self::assertInstanceOf(Price::class, $this->getField($deseralizedOrder, 'cost'));
     }
 
     public function testObjectWithNullableArrays()
@@ -1533,15 +1693,16 @@ abstract class BaseSerializationTest extends TestCase
             GraphNavigatorInterface::DIRECTION_SERIALIZATION,
             'Virtual',
             $this->getFormat(),
-            function ($visitor, $data) use (&$invoked) {
+            static function ($visitor, $data) use (&$invoked) {
                 $invoked = true;
-                $this->assertEquals('foo', $data);
+                self::assertEquals('foo', $data);
+
                 return null;
             }
         );
 
         $this->serializer->serialize('foo', $this->getFormat(), null, 'Virtual');
-        $this->assertTrue($invoked);
+        self::assertTrue($invoked);
     }
 
     public function getFirstClassListCollectionsValues()
@@ -1591,6 +1752,7 @@ abstract class BaseSerializationTest extends TestCase
         if (!$this->hasDeserializer()) {
             return;
         }
+
         self::assertEquals(
             new ObjectWithIterable(Functions::iterableToArray($generator())),
             $this->deserialize($this->getContent('iterable'), get_class($withIterable))
@@ -1609,6 +1771,7 @@ abstract class BaseSerializationTest extends TestCase
         if (!$this->hasDeserializer()) {
             return;
         }
+
         self::assertEquals(
             $withGenerator,
             $this->deserialize($this->getContent('generator'), get_class($withGenerator))
@@ -1627,6 +1790,7 @@ abstract class BaseSerializationTest extends TestCase
         if (!$this->hasDeserializer()) {
             return;
         }
+
         self::assertEquals(
             $withIterator,
             $this->deserialize($this->getContent('iterator'), get_class($withIterator))
@@ -1645,6 +1809,7 @@ abstract class BaseSerializationTest extends TestCase
         if (!$this->hasDeserializer()) {
             return;
         }
+
         self::assertEquals(
             $withArrayIterator,
             $this->deserialize($this->getContent('iterator'), get_class($withArrayIterator))
@@ -1684,7 +1849,7 @@ abstract class BaseSerializationTest extends TestCase
         $this->handlerRegistry->registerSubscribingHandler(new ConstraintViolationHandler());
         $this->handlerRegistry->registerSubscribingHandler(new StdClassHandler());
         $this->handlerRegistry->registerSubscribingHandler(new DateHandler());
-        $this->handlerRegistry->registerSubscribingHandler(new FormErrorHandler(new IdentityTranslator(new MessageSelector())));
+        $this->handlerRegistry->registerSubscribingHandler(new FormErrorHandler(new IdentityTranslator()));
         $this->handlerRegistry->registerSubscribingHandler(new ArrayCollectionHandler());
         $this->handlerRegistry->registerSubscribingHandler(new IteratorHandler());
         $this->handlerRegistry->registerHandler(

@@ -109,11 +109,17 @@ class YamlDriver extends AbstractFileDriver
 
         $exclusionPolicy = isset($config['exclusion_policy']) ? strtoupper($config['exclusion_policy']) : 'NONE';
         $excludeAll = isset($config['exclude']) ? (bool) $config['exclude'] : false;
+
+        if (isset($config['exclude_if'])) {
+            $metadata->excludeIf = $this->parseExpression((string) $config['exclude_if']);
+        }
+
         $classAccessType = $config['access_type'] ?? PropertyMetadata::ACCESS_TYPE_PROPERTY;
         $readOnlyClass = isset($config['read_only']) ? (bool) $config['read_only'] : false;
         $this->addClassProperties($metadata, $config);
 
         $propertiesMetadata = [];
+        $propertiesData = [];
         if (array_key_exists('virtual_properties', $config)) {
             foreach ($config['virtual_properties'] as $methodName => $propertySettings) {
                 if (isset($propertySettings['exp'])) {
@@ -129,13 +135,12 @@ class YamlDriver extends AbstractFileDriver
                             'The method ' . $methodName . ' not found in class ' . $class->name
                         );
                     }
+
                     $virtualPropertyMetadata = new VirtualPropertyMetadata($name, $methodName);
                 }
 
-                $pName = !empty($propertySettings['name']) ? $propertySettings['name'] : $virtualPropertyMetadata->name;
-
-                $propertiesMetadata[$pName] = $virtualPropertyMetadata;
-                $config['properties'][$pName] = $propertySettings;
+                $propertiesMetadata[] = $virtualPropertyMetadata;
+                $propertiesData[] = $propertySettings;
             }
         }
 
@@ -146,18 +151,20 @@ class YamlDriver extends AbstractFileDriver
                 }
 
                 $pName = $property->getName();
-                $propertiesMetadata[$pName] = new PropertyMetadata($name, $pName);
+                $propertiesMetadata[] = new PropertyMetadata($name, $pName);
+                $propertiesData[] =  !empty($config['properties']) && true === array_key_exists($pName, $config['properties'])
+                    ? (array) $config['properties'][$pName]
+                    : null;
             }
 
-            foreach ($propertiesMetadata as $pName => $pMetadata) {
+            foreach ($propertiesMetadata as $propertyKey => $pMetadata) {
                 $isExclude = false;
                 $isExpose = $pMetadata instanceof VirtualPropertyMetadata
                     || $pMetadata instanceof ExpressionPropertyMetadata
-                    || (isset($config['properties']) && array_key_exists($pName, $config['properties']));
+                    || isset($propertiesData[$propertyKey]);
 
-                if (isset($config['properties'][$pName])) {
-                    $pConfig = $config['properties'][$pName];
-
+                $pConfig = $propertiesData[$propertyKey];
+                if (!empty($pConfig)) {
                     if (isset($pConfig['exclude'])) {
                         $isExclude = (bool) $pConfig['exclude'];
                     }
@@ -304,15 +311,12 @@ class YamlDriver extends AbstractFileDriver
                     $metadata->isMap = $metadata->isMap || PropertyMetadata::isCollectionMap($pMetadata->type);
                 }
 
-                if (isset($config['properties'][$pName])) {
-                    $pConfig = $config['properties'][$pName];
-
-                    if (isset($pConfig['name'])) {
-                        $pMetadata->name = (string) $pConfig['name'];
-                    }
+                if (!empty($pConfig) && !empty($pConfig['name'])) {
+                    $pMetadata->name = (string) $pConfig['name'];
                 }
 
-                if ((ExclusionPolicy::NONE === $exclusionPolicy && !$isExclude)
+                if (
+                    (ExclusionPolicy::NONE === $exclusionPolicy && !$isExclude)
                     || (ExclusionPolicy::ALL === $exclusionPolicy && $isExpose)
                 ) {
                     $metadata->addPropertyMetadata($pMetadata);
@@ -326,9 +330,11 @@ class YamlDriver extends AbstractFileDriver
             if (isset($cConfig['pre_serialize'])) {
                 $metadata->preSerializeMethods = $this->getCallbackMetadata($class, $cConfig['pre_serialize']);
             }
+
             if (isset($cConfig['post_serialize'])) {
                 $metadata->postSerializeMethods = $this->getCallbackMetadata($class, $cConfig['post_serialize']);
             }
+
             if (isset($cConfig['post_deserialize'])) {
                 $metadata->postDeserializeMethods = $this->getCallbackMetadata($class, $cConfig['post_deserialize']);
             }
@@ -394,6 +400,7 @@ class YamlDriver extends AbstractFileDriver
                         'The "map" attribute must be set, and be an array for discriminators.'
                     );
                 }
+
                 $groups = $config['discriminator']['groups'] ?? [];
                 $metadata->setDiscriminator(
                     $config['discriminator']['field_name'],
@@ -404,10 +411,12 @@ class YamlDriver extends AbstractFileDriver
                 if (isset($config['discriminator']['xml_attribute'])) {
                     $metadata->xmlDiscriminatorAttribute = (bool) $config['discriminator']['xml_attribute'];
                 }
+
                 if (isset($config['discriminator']['xml_element'])) {
                     if (isset($config['discriminator']['xml_element']['cdata'])) {
                         $metadata->xmlDiscriminatorCData = (bool) $config['discriminator']['xml_element']['cdata'];
                     }
+
                     if (isset($config['discriminator']['xml_element']['namespace'])) {
                         $metadata->xmlDiscriminatorNamespace = (string) $config['discriminator']['xml_element']['namespace'];
                     }
